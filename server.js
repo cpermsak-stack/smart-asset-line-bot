@@ -14,11 +14,9 @@ const client = new line.Client(config);
 app.use("/webhook", line.middleware(config));
 app.use(express.json());
 
-// ===== MEMORY STORAGE (Watchlist + Alerts) =====
 const userWatchlist = {};
 const userAlerts = {};
 
-// ===== Helper: Get Crypto Price =====
 async function getCrypto(symbol) {
   const idMap = {
     BTC: "bitcoin",
@@ -27,118 +25,104 @@ async function getCrypto(symbol) {
 
   if (!idMap[symbol]) return null;
 
-  const url = `https://api.coingecko.com/api/v3/simple/price?ids=${idMap[symbol]}&vs_currencies=usd&include_24hr_change=true`;
+  try {
+    const url = `https://api.coingecko.com/api/v3/simple/price?ids=${idMap[symbol]}&vs_currencies=usd&include_24hr_change=true`;
+    const res = await axios.get(url);
+    const data = res.data[idMap[symbol]];
 
-  const res = await axios.get(url);
-  const data = res.data[idMap[symbol]];
-
-  return {
-    price: data.usd,
-    change: data.usd_24h_change.toFixed(2)
-  };
+    return {
+      price: data.usd,
+      change: data.usd_24h_change.toFixed(2)
+    };
+  } catch (err) {
+    console.log("Crypto error:", err.message);
+    return null;
+  }
 }
 
-// ===== Helper: Gold Price (via BTC proxy for demo) =====
 async function getGold() {
-  const url = `https://api.coingecko.com/api/v3/simple/price?ids=tether-gold&vs_currencies=usd&include_24hr_change=true`;
-  const res = await axios.get(url);
-  const data = res.data["tether-gold"];
+  try {
+    const url = `https://api.coingecko.com/api/v3/simple/price?ids=tether-gold&vs_currencies=usd&include_24hr_change=true`;
+    const res = await axios.get(url);
+    const data = res.data["tether-gold"];
 
-  return {
-    price: data.usd,
-    change: data.usd_24h_change.toFixed(2)
-  };
-}
-
-// ===== Alert Checker =====
-async function checkAlerts() {
-  for (const userId in userAlerts) {
-    const alert = userAlerts[userId];
-    const crypto = await getCrypto(alert.symbol);
-    if (crypto && crypto.price >= alert.target) {
-      await client.pushMessage(userId, {
-        type: "text",
-        text: `🚨 ${alert.symbol} ถึง ${crypto.price} USD แล้ว`
-      });
-      delete userAlerts[userId];
-    }
+    return {
+      price: data.usd,
+      change: data.usd_24h_change.toFixed(2)
+    };
+  } catch (err) {
+    console.log("Gold error:", err.message);
+    return null;
   }
 }
 
-setInterval(checkAlerts, 60000); // เช็คทุก 1 นาที
-
-// ===== Webhook =====
 app.post("/webhook", async (req, res) => {
-  const events = req.body.events;
+  try {
+    const events = req.body.events;
 
-  for (const event of events) {
-    if (event.type !== "message" || event.message.type !== "text") continue;
+    await Promise.all(events.map(async (event) => {
+      if (event.type !== "message" || event.message.type !== "text") return;
 
-    const userId = event.source.userId;
-    const text = event.message.text.toUpperCase();
+      const userId = event.source.userId;
+      const text = event.message.text.toUpperCase();
 
-    // ===== GOLD =====
-    if (text === "GOLD") {
-      const gold = await getGold();
-      await client.replyMessage(event.replyToken, {
+      if (text === "GOLD") {
+        const gold = await getGold();
+        if (!gold) {
+          return client.replyMessage(event.replyToken, {
+            type: "text",
+            text: "ดึงราคาทองไม่ได้"
+          });
+        }
+
+        return client.replyMessage(event.replyToken, {
+          type: "text",
+          text: `ทองคำ: ${gold.price} USD\n24h: ${gold.change}%`
+        });
+      }
+
+      if (text.startsWith("ADD ")) {
+        const symbol = text.split(" ")[1];
+        userWatchlist[userId] = userWatchlist[userId] || [];
+        userWatchlist[userId].push(symbol);
+
+        return client.replyMessage(event.replyToken, {
+          type: "text",
+          text: `เพิ่ม ${symbol} แล้ว`
+        });
+      }
+
+      if (text === "LIST") {
+        const list = userWatchlist[userId] || [];
+        return client.replyMessage(event.replyToken, {
+          type: "text",
+          text: list.length ? list.join("\n") : "Watchlist ว่าง"
+        });
+      }
+
+      const crypto = await getCrypto(text);
+      if (crypto) {
+        return client.replyMessage(event.replyToken, {
+          type: "text",
+          text: `${text} ราคา: ${crypto.price} USD\n24h: ${crypto.change}%`
+        });
+      }
+
+      return client.replyMessage(event.replyToken, {
         type: "text",
-        text: `ทองคำ: ${gold.price} USD\n24h: ${gold.change}%`
+        text: "ไม่พบข้อมูล"
       });
-      continue;
-    }
+    }));
 
-    // ===== WATCHLIST =====
-    if (text.startsWith("ADD ")) {
-      const symbol = text.split(" ")[1];
-      userWatchlist[userId] = userWatchlist[userId] || [];
-      userWatchlist[userId].push(symbol);
-
-      await client.replyMessage(event.replyToken, {
-        type: "text",
-        text: `เพิ่ม ${symbol} ใน Watchlist แล้ว`
-      });
-      continue;
-    }
-
-    if (text === "LIST") {
-      const list = userWatchlist[userId] || [];
-      await client.replyMessage(event.replyToken, {
-        type: "text",
-        text: list.length ? `Watchlist:\n${list.join("\n")}` : "ไม่มีรายการ"
-      });
-      continue;
-    }
-
-    // ===== ALERT =====
-    if (text.startsWith("ALERT ")) {
-      const parts = text.split(" ");
-      const symbol = parts[1];
-      const target = parseFloat(parts[2]);
-
-      userAlerts[userId] = { symbol, target };
-
-      await client.replyMessage(event.replyToken, {
-        type: "text",
-        text: `ตั้งแจ้งเตือน ${symbol} ที่ ${target} USD แล้ว`
-      });
-      continue;
-    }
-
-    // ===== CRYPTO =====
-    const crypto = await getCrypto(text);
-    if (crypto) {
-      await client.replyMessage(event.replyToken, {
-        type: "text",
-        text: `${text} ราคา: ${crypto.price} USD\n24h: ${crypto.change}%`
-      });
-    }
+    res.sendStatus(200);
+  } catch (err) {
+    console.log("Webhook error:", err.message);
+    res.sendStatus(500);
   }
-
-  res.sendStatus(200);
 });
 
 app.get("/", (req, res) => {
-  res.send("Smart Asset Bot Running V2");
+  res.send("Smart Asset Bot V2 Running");
 });
 
 app.listen(10000, () => {
