@@ -46,9 +46,28 @@ async function getPrice(symbol) {
 
     try {
 
+      // ======================
+      // 🥇 GOLD FIX (NO BINANCE)
+      // ======================
+      if (symbol === "XAUUSDT") {
+
+        const data = await safeRequest(
+          "https://api.metals.live/v1/spot"
+        )
+
+        const gold = data.find(x => x.gold)
+
+        return save(symbol, {
+          price: gold.gold,
+          change: 0
+        })
+      }
+
+      // ======================
+      // 🪙 CRYPTO (BINANCE)
+      // ======================
       let data
 
-      // Futures
       try {
         data = await safeRequest(
           `https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=${symbol}`
@@ -61,37 +80,13 @@ async function getPrice(symbol) {
 
       } catch {}
 
-      // Spot
-      try {
-        data = await safeRequest(
-          `https://api.binance.com/api/v3/ticker/24hr?symbol=${symbol}`
-        )
-
-        return save(symbol, {
-          price: parseFloat(data.lastPrice),
-          change: parseFloat(data.priceChangePercent)
-        })
-
-      } catch {}
-
-      // CoinGecko
-      const cgMap = {
-        BTCUSDT: "bitcoin",
-        ETHUSDT: "ethereum",
-        XAUUSDT: "tether-gold"
-      }
-
-      if (!cgMap[symbol]) throw new Error("No fallback")
-
       data = await safeRequest(
-        `https://api.coingecko.com/api/v3/simple/price?ids=${cgMap[symbol]}&vs_currencies=usd&include_24hr_change=true`
+        `https://api.binance.com/api/v3/ticker/24hr?symbol=${symbol}`
       )
 
-      const coin = data[cgMap[symbol]]
-
       return save(symbol, {
-        price: coin.usd,
-        change: coin.usd_24h_change
+        price: parseFloat(data.lastPrice),
+        change: parseFloat(data.priceChangePercent)
       })
 
     } finally {
@@ -103,69 +98,6 @@ async function getPrice(symbol) {
   return pending[symbol]
 }
 
-function save(symbol, result) {
-  cache[symbol] = {
-    data: result,
-    time: Date.now()
-  }
-  return result
-}
-
-// ==========================
-// 🔎 SYMBOL MAP
-// ==========================
-function mapSymbol(text) {
-  const t = text.toLowerCase()
-
-  if (t === "btc") return "BTCUSDT"
-  if (t === "eth") return "ETHUSDT"
-  if (t === "ทอง" || t === "gold") return "XAUUSDT"
-
-  return null
-}
-
-// ==========================
-// 🎨 FLEX MESSAGE BUILDER
-// ==========================
-function buildFlex(symbol, price, change) {
-
-  const coin = symbol.replace("USDT", "")
-  const color = change >= 0 ? "#00C853" : "#D50000"
-  const arrow = change >= 0 ? "📈" : "📉"
-
-  return {
-    type: "flex",
-    altText: `${coin} Price`,
-    contents: {
-      type: "bubble",
-      body: {
-        type: "box",
-        layout: "vertical",
-        contents: [
-          {
-            type: "text",
-            text: `💰 ${coin}`,
-            weight: "bold",
-            size: "xl"
-          },
-          {
-            type: "text",
-            text: `$${price.toFixed(2)} USD`,
-            size: "lg",
-            margin: "md"
-          },
-          {
-            type: "text",
-            text: `${arrow} 24H: ${change.toFixed(2)}%`,
-            size: "md",
-            color: color,
-            margin: "sm"
-          }
-        ]
-      }
-    }
-  }
-}
 
 // ==========================
 // 🤖 REPLY TO LINE
