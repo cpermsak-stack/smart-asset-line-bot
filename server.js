@@ -50,11 +50,16 @@ const CACHE_TTL = 30000;
 // ================= GET MULTI PRICE =================
 async function getPrices(symbols) {
   try {
-    const ids = symbols
-      .map(sym => cryptoMap[normalize(sym)])
+    const normalized = symbols.map(s => normalize(s));
+
+    const ids = normalized
+      .map(sym => cryptoMap[sym])
       .filter(Boolean);
 
-    if (ids.length === 0) return {};
+    if (ids.length === 0) {
+      console.log("NO MATCH IN MAP:", normalized);
+      return {};
+    }
 
     const uniqueIds = [...new Set(ids)].join(",");
 
@@ -71,16 +76,24 @@ async function getPrices(symbols) {
 
     const result = {};
 
-    symbols.forEach(sym => {
-      const key = normalize(sym);
-      const id = cryptoMap[key];
+    normalized.forEach(sym => {
+      const id = cryptoMap[sym];
       if (response.data[id]) {
-        result[key] = {
+        result[sym] = {
           price: response.data[id].usd,
           change: response.data[id].usd_24h_change
         };
       }
     });
+
+    return result;
+
+  } catch (err) {
+    console.log("PRICE ERROR:", err.message);
+    return {};
+  }
+}
+
 
     return result;
 
