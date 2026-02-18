@@ -43,10 +43,6 @@ function normalize(text) {
   return text.trim().toUpperCase();
 }
 
-// ================= CACHE =================
-const priceCache = {};
-const CACHE_TTL = 30000;
-
 // ================= GET MULTI PRICE =================
 async function getPrices(symbols) {
   try {
@@ -57,7 +53,6 @@ async function getPrices(symbols) {
       .filter(Boolean);
 
     if (ids.length === 0) {
-      console.log("NO MATCH IN MAP:", normalized);
       return {};
     }
 
@@ -85,15 +80,6 @@ async function getPrices(symbols) {
         };
       }
     });
-
-    return result;
-
-  } catch (err) {
-    console.log("PRICE ERROR:", err.message);
-    return {};
-  }
-}
-
 
     return result;
 
@@ -132,7 +118,7 @@ async function checkAlerts() {
           type: "text",
           text:
             `🚨 แจ้งเตือน!\n` +
-            `${alert.symbol.toUpperCase()} ราคา ${current.price} USD`
+            `${alert.symbol} ราคา ${current.price} USD`
         });
 
         await pool.query("DELETE FROM alerts WHERE id = $1", [alert.id]);
@@ -153,95 +139,24 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
     if (!event || event.type !== "message") return res.sendStatus(200);
 
     const text = event.message.text.trim();
-    const textUpper = text.toUpperCase();
     const userId = event.source.userId;
 
-    // ===== LIST =====
-    if (textUpper === "LIST" || text === "รายการแจ้งเตือน") {
-      const result = await pool.query(
-        "SELECT * FROM alerts WHERE user_id = $1 ORDER BY id",
-        [userId]
-      );
-
-      if (result.rows.length === 0) {
-        return client.replyMessage(event.replyToken, {
-          type: "text",
-          text: "ยังไม่มีการตั้งแจ้งเตือน"
-        });
-      }
-
-      let message = "📌 แจ้งเตือนของคุณ\n";
-      result.rows.forEach((a, i) => {
-        const sign = a.condition === "above" ? "≥" : "≤";
-        message += `${i + 1}. ${a.symbol} ${sign} ${a.target}\n`;
-      });
-
-      return client.replyMessage(event.replyToken, {
-        type: "text",
-        text: message
-      });
-    }
-
-    // ===== DELETE ALL =====
-    if (textUpper === "DELETE ALL" || text === "ลบทั้งหมด") {
-      await pool.query("DELETE FROM alerts WHERE user_id = $1", [userId]);
-      return client.replyMessage(event.replyToken, {
-        type: "text",
-        text: "ลบแจ้งเตือนทั้งหมดแล้ว"
-      });
-    }
-
-    // ===== DELETE INDEX =====
-    if (textUpper.startsWith("DELETE ") || text.startsWith("ลบ ")) {
-      const index = parseInt(text.split(" ")[1]);
-      if (isNaN(index)) return res.sendStatus(200);
-
-      const result = await pool.query(
-        "SELECT * FROM alerts WHERE user_id = $1 ORDER BY id",
-        [userId]
-      );
-
-      if (!result.rows[index - 1]) {
-        return client.replyMessage(event.replyToken, {
-          type: "text",
-          text: "ไม่พบรายการ"
-        });
-      }
-
-      await pool.query("DELETE FROM alerts WHERE id = $1", [
-        result.rows[index - 1].id
-      ]);
-
-      return client.replyMessage(event.replyToken, {
-        type: "text",
-        text: "ลบแจ้งเตือนแล้ว"
-      });
-    }
-
     // ===== ALERT =====
-    if (textUpper.startsWith("ALERT ") || text.startsWith("แจ้งเตือน ")) {
+    if (text.toUpperCase().startsWith("ALERT ")) {
       const parts = text.split(" ");
       const symbol = parts[1];
-      let condition = "above";
-      let target;
-
-      if (parts.includes("below") || parts.includes("ต่ำกว่า")) {
-        condition = "below";
-        target = parseFloat(parts[parts.length - 1]);
-      } else {
-        target = parseFloat(parts[2]);
-      }
+      const target = parseFloat(parts[2]);
 
       if (!symbol || isNaN(target)) {
         return client.replyMessage(event.replyToken, {
           type: "text",
-          text: "ตัวอย่าง: ALERT BTC 70000 หรือ ALERT BTC BELOW 65000"
+          text: "ตัวอย่าง: ALERT BTC 70000"
         });
       }
 
       await pool.query(
-        "INSERT INTO alerts (user_id, symbol, target, condition) VALUES ($1,$2,$3,$4)",
-        [userId, normalize(symbol), target, condition]
+        "INSERT INTO alerts (user_id, symbol, target) VALUES ($1,$2,$3)",
+        [userId, normalize(symbol), target]
       );
 
       return client.replyMessage(event.replyToken, {
@@ -276,5 +191,5 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 });
 
 app.listen(process.env.PORT || 3000, () => {
-  console.log("Server running (Version 3) 🚀");
+  console.log("Server running (Version 3 Fixed) 🚀");
 });
