@@ -41,46 +41,75 @@ function normalize(text) {
   return text.trim().toUpperCase();
 }
 
+// ================= CACHE =================
+const priceCache = {
+  data: {},
+  timestamp: 0
+};
+
+const CACHE_TTL = 60000; // 60 วินาที
+
 // ================= GET PRICE =================
 async function getPrices(symbols) {
-  const result = {};
+  const now = Date.now();
 
-  for (const sym of symbols) {
-    const symbol = normalize(sym);
-
-    try {
-      // ===== CRYPTO (Spot) =====
-      if (cryptoMap[symbol]) {
-        const response = await axios.get(
-          "https://api.binance.com/api/v3/ticker/24hr",
-          { params: { symbol: cryptoMap[symbol] } }
-        );
-
-        result[symbol] = {
-          price: parseFloat(response.data.lastPrice),
-          change: parseFloat(response.data.priceChangePercent)
-        };
-      }
-
-      // ===== GOLD (Binance Futures) =====
-      else if (symbol === "ทอง" || symbol === "GOLD") {
-        const response = await axios.get(
-          "https://fapi.binance.com/fapi/v1/ticker/24hr",
-          { params: { symbol: "XAUUSDT" } }
-        );
-
-        result[symbol] = {
-          price: parseFloat(response.data.lastPrice),
-          change: parseFloat(response.data.priceChangePercent)
-        };
-      }
-
-    } catch (err) {
-      console.log("PRICE ERROR for", symbol, err.response?.status);
-    }
+  // ===== ใช้ cache ถ้ายังไม่หมดอายุ =====
+  if (now - priceCache.timestamp < CACHE_TTL) {
+    return priceCache.data;
   }
 
-  return result;
+  const result = {};
+  const normalized = symbols.map(s => normalize(s));
+
+  try {
+    // ===== 1. CRYPTO (Batch Request Binance) =====
+    const cryptoSymbols = normalized.filter(s => cryptoMap[s]);
+
+    if (cryptoSymbols.length > 0) {
+      const response = await axios.get(
+        "https://api.binance.com/api/v3/ticker/24hr"
+      );
+
+      cryptoSymbols.forEach(sym => {
+        const pair = cryptoMap[sym];
+        const found = response.data.find(t => t.symbol === pair);
+
+        if (found) {
+          result[sym] = {
+            price: parseFloat(found.lastPrice),
+            change: parseFloat(found.priceChangePercent)
+          };
+        }
+      });
+    }
+
+    // ===== 2. GOLD (Yahoo Finance - XAUUSD) =====
+    if (normalized.includes("ทอง") || normalized.includes("GOLD")) {
+      const goldRes = await axios.get(
+        "https://query1.finance.yahoo.com/v7/finance/quote",
+        { params: { symbols: "GC=F" } }
+      );
+
+      const goldData = goldRes.data.quoteResponse.result[0];
+
+      result["ทอง"] = {
+        price: goldData.regularMarketPrice,
+        change: goldData.regularMarketChangePercent
+      };
+
+      result["GOLD"] = result["ทอง"];
+    }
+
+    // บันทึก cache
+    priceCache.data = result;
+    priceCache.timestamp = now;
+
+    return result;
+
+  } catch (err) {
+    console.log("ULTRA PRICE ERROR:", err.response?.status || err.message);
+    return {};
+  }
 }
 
 // ================= CHECK ALERTS =================
@@ -173,7 +202,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
       text:
         `💰 ${normalize(text)}\n` +
         `ราคา: ${data.price} USD\n` +
-        `24h: ${data.change}%`
+        `24h: ${data.change.toFixed(2)}%`
     });
 
   } catch (err) {
@@ -183,5 +212,5 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 });
 
 app.listen(process.env.PORT || 3000, () => {
-  console.log("Server running (Binance Futures Gold FIX) 🚀");
+  console.log("Server running (ULTRA STABLE) 🚀");
 });
