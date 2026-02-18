@@ -43,18 +43,30 @@ function normalize(text) {
   return text.trim().toUpperCase();
 }
 
-// ================= GET MULTI PRICE =================
+// ================= CACHE =================
+const priceCache = {
+  data: {},
+  timestamp: 0
+};
+
+const CACHE_TTL = 30000; // 30 วินาที
+
 async function getPrices(symbols) {
   try {
+    const now = Date.now();
+
+    // ถ้า cache ยังไม่หมดอายุ
+    if (now - priceCache.timestamp < CACHE_TTL) {
+      return priceCache.data;
+    }
+
     const normalized = symbols.map(s => normalize(s));
 
     const ids = normalized
       .map(sym => cryptoMap[sym])
       .filter(Boolean);
 
-    if (ids.length === 0) {
-      return {};
-    }
+    if (ids.length === 0) return {};
 
     const uniqueIds = [...new Set(ids)].join(",");
 
@@ -81,6 +93,10 @@ async function getPrices(symbols) {
       }
     });
 
+    // บันทึก cache
+    priceCache.data = result;
+    priceCache.timestamp = now;
+
     return result;
 
   } catch (err) {
@@ -92,6 +108,7 @@ async function getPrices(symbols) {
     return {};
   }
 }
+
 
 // ================= CHECK ALERTS =================
 async function checkAlerts() {
