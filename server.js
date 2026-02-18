@@ -30,85 +30,45 @@ async function initDB() {
 }
 initDB();
 
-// ================= MAP =================
+// ================= SYMBOL MAP =================
 const cryptoMap = {
-  BTC: "bitcoin",
-  ETH: "ethereum",
-  GOLD: "pax-gold",
-  ทอง: "pax-gold",
-  บิทคอยน์: "bitcoin"
+  BTC: "BTCUSDT",
+  ETH: "ETHUSDT",
+  BNB: "BNBUSDT",
+  ทอง: "XAUUSDT",
+  GOLD: "XAUUSDT"
 };
 
 function normalize(text) {
   return text.trim().toUpperCase();
 }
 
-// ================= CACHE =================
-const priceCache = {
-  data: {},
-  timestamp: 0
-};
-
-const CACHE_TTL = 30000; // 30 วินาที
-
+// ================= GET PRICE FROM BINANCE =================
 async function getPrices(symbols) {
   try {
-    const now = Date.now();
-
-    // ถ้า cache ยังไม่หมดอายุ
-    if (now - priceCache.timestamp < CACHE_TTL) {
-      return priceCache.data;
-    }
-
-    const normalized = symbols.map(s => normalize(s));
-
-    const ids = normalized
-      .map(sym => cryptoMap[sym])
-      .filter(Boolean);
-
-    if (ids.length === 0) return {};
-
-    const uniqueIds = [...new Set(ids)].join(",");
-
-    const response = await axios.get(
-      "https://api.coingecko.com/api/v3/simple/price",
-      {
-        params: {
-          ids: uniqueIds,
-          vs_currencies: "usd",
-          include_24hr_change: true
-        }
-      }
-    );
-
     const result = {};
 
-    normalized.forEach(sym => {
-      const id = cryptoMap[sym];
-      if (response.data[id]) {
-        result[sym] = {
-          price: response.data[id].usd,
-          change: response.data[id].usd_24h_change
-        };
-      }
-    });
+    for (const sym of symbols) {
+      const mapped = cryptoMap[normalize(sym)];
+      if (!mapped) continue;
 
-    // บันทึก cache
-    priceCache.data = result;
-    priceCache.timestamp = now;
+      const response = await axios.get(
+        `https://api.binance.com/api/v3/ticker/24hr?symbol=${mapped}`
+      );
+
+      result[normalize(sym)] = {
+        price: parseFloat(response.data.lastPrice),
+        change: parseFloat(response.data.priceChangePercent)
+      };
+    }
 
     return result;
 
   } catch (err) {
-    if (err.response?.status === 429) {
-      console.log("RATE LIMIT HIT (429)");
-    } else {
-      console.log("PRICE ERROR:", err.message);
-    }
+    console.log("BINANCE ERROR:", err.message);
     return {};
   }
 }
-
 
 // ================= CHECK ALERTS =================
 async function checkAlerts() {
@@ -121,6 +81,7 @@ async function checkAlerts() {
     ];
 
     const prices = await getPrices(symbols);
+    if (!prices || Object.keys(prices).length === 0) return;
 
     for (const alert of result.rows) {
       const current = prices[normalize(alert.symbol)];
@@ -135,7 +96,8 @@ async function checkAlerts() {
           type: "text",
           text:
             `🚨 แจ้งเตือน!\n` +
-            `${alert.symbol} ราคา ${current.price} USD`
+            `${alert.symbol}\n` +
+            `ราคา: ${current.price} USD`
         });
 
         await pool.query("DELETE FROM alerts WHERE id = $1", [alert.id]);
@@ -147,7 +109,7 @@ async function checkAlerts() {
   }
 }
 
-setInterval(checkAlerts, 120000);
+setInterval(checkAlerts, 60000);
 
 // ================= WEBHOOK =================
 app.post("/webhook", line.middleware(config), async (req, res) => {
@@ -156,24 +118,33 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
     if (!event || event.type !== "message") return res.sendStatus(200);
 
     const text = event.message.text.trim();
+    const textUpper = text.toUpperCase();
     const userId = event.source.userId;
 
     // ===== ALERT =====
-    if (text.toUpperCase().startsWith("ALERT ")) {
+    if (textUpper.startsWith("ALERT ") || text.startsWith("แจ้งเตือน ")) {
       const parts = text.split(" ");
       const symbol = parts[1];
-      const target = parseFloat(parts[2]);
+      let condition = "above";
+      let target;
+
+      if (parts.includes("BELOW") || parts.includes("ต่ำกว่า")) {
+        condition = "below";
+        target = parseFloat(parts[parts.length - 1]);
+      } else {
+        target = parseFloat(parts[2]);
+      }
 
       if (!symbol || isNaN(target)) {
         return client.replyMessage(event.replyToken, {
           type: "text",
-          text: "ตัวอย่าง: ALERT BTC 70000"
+          text: "ตัวอย่าง: ALERT BTC 70000 หรือ ALERT BTC BELOW 65000"
         });
       }
 
       await pool.query(
-        "INSERT INTO alerts (user_id, symbol, target) VALUES ($1,$2,$3)",
-        [userId, normalize(symbol), target]
+        "INSERT INTO alerts (user_id, symbol, target, condition) VALUES ($1,$2,$3,$4)",
+        [userId, normalize(symbol), target, condition]
       );
 
       return client.replyMessage(event.replyToken, {
@@ -208,5 +179,5 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 });
 
 app.listen(process.env.PORT || 3000, () => {
-  console.log("Server running (Version 3 Fixed) 🚀");
+  console.log("Server running (Binance Version) 🚀");
 });
