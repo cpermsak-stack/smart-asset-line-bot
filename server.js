@@ -7,22 +7,22 @@ app.use(express.json())
 const PORT = process.env.PORT || 10000
 
 // =========================
-// GLOBAL CACHE SYSTEM
+// GLOBAL CACHE
 // =========================
 const cache = {}
 const pending = {}
 const CACHE_TTL = 20000
 
 // =========================
-// SAFE REQUEST (Retry 429)
+// SAFE REQUEST
 // =========================
 async function safeRequest(url, retries = 2) {
   try {
-    const res = await axios.get(url, { timeout: 5000 })
+    const res = await axios.get(url, { timeout: 8000 })
     return res.data
   } catch (err) {
     if (err.response?.status === 429 && retries > 0) {
-      await new Promise(r => setTimeout(r, 1200))
+      await new Promise(r => setTimeout(r, 1500))
       return safeRequest(url, retries - 1)
     }
     throw err
@@ -54,6 +54,22 @@ function save(symbol, result) {
 }
 
 // =========================
+// GET 7 DAY CHANGE
+// =========================
+async function get7DayChange(id) {
+
+  const data = await safeRequest(
+    `https://api.coingecko.com/api/v3/coins/${id}/market_chart?vs_currency=usd&days=7`
+  )
+
+  const prices = data.prices
+  const first = prices[0][1]
+  const last = prices[prices.length - 1][1]
+
+  return ((last - first) / first) * 100
+}
+
+// =========================
 // PRICE FETCHER
 // =========================
 async function getPrice(symbol) {
@@ -71,20 +87,27 @@ async function getPrice(symbol) {
     try {
 
       // =====================
-      // GOLD (Separate API)
+      // GOLD (CoinGecko)
       // =====================
       if (symbol === "XAU") {
-        const data = await safeRequest("https://api.metals.live/v1/spot")
-        const gold = data.find(x => x.gold)
+
+        const data = await safeRequest(
+          "https://api.coingecko.com/api/v3/simple/price?ids=tether-gold&vs_currencies=usd&include_24hr_change=true"
+        )
+
+        const price = data["tether-gold"].usd
+        const change24 = data["tether-gold"].usd_24h_change
+        const change7 = await get7DayChange("tether-gold")
 
         return save(symbol, {
-          price: gold.gold,
-          change: 0
+          price,
+          change24,
+          change7
         })
       }
 
       // =====================
-      // CRYPTO (Binance)
+      // CRYPTO
       // =====================
       let data
 
@@ -92,21 +115,22 @@ async function getPrice(symbol) {
         data = await safeRequest(
           `https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=${symbol}`
         )
+      } catch {
+        data = await safeRequest(
+          `https://api.binance.com/api/v3/ticker/24hr?symbol=${symbol}`
+        )
+      }
 
-        return save(symbol, {
-          price: parseFloat(data.lastPrice),
-          change: parseFloat(data.priceChangePercent)
-        })
+      const price = parseFloat(data.lastPrice)
+      const change24 = parseFloat(data.priceChangePercent)
 
-      } catch {}
-
-      data = await safeRequest(
-        `https://api.binance.com/api/v3/ticker/24hr?symbol=${symbol}`
-      )
+      const cgId = symbol === "BTCUSDT" ? "bitcoin" : "ethereum"
+      const change7 = await get7DayChange(cgId)
 
       return save(symbol, {
-        price: parseFloat(data.lastPrice),
-        change: parseFloat(data.priceChangePercent)
+        price,
+        change24,
+        change7
       })
 
     } finally {
@@ -119,13 +143,14 @@ async function getPrice(symbol) {
 }
 
 // =========================
-// FLEX MESSAGE BUILDER
+// FLEX BUILDER
 // =========================
-function buildFlex(symbol, price, change) {
+function buildFlex(symbol, data) {
 
   const name = symbol === "XAU" ? "GOLD" : symbol.replace("USDT", "")
-  const color = change >= 0 ? "#00C853" : "#D50000"
-  const arrow = change >= 0 ? "📈" : "📉"
+
+  const color24 = data.change24 >= 0 ? "#00C853" : "#D50000"
+  const color7 = data.change7 >= 0 ? "#00C853" : "#D50000"
 
   return {
     type: "flex",
@@ -144,15 +169,22 @@ function buildFlex(symbol, price, change) {
           },
           {
             type: "text",
-            text: `$${price.toFixed(2)} USD`,
+            text: `$${data.price.toFixed(2)} USD`,
             size: "lg",
             margin: "md"
           },
           {
             type: "text",
-            text: `${arrow} 24H: ${change.toFixed(2)}%`,
+            text: `📊 24H: ${data.change24.toFixed(2)}%`,
             size: "md",
-            color: color,
+            color: color24,
+            margin: "sm"
+          },
+          {
+            type: "text",
+            text: `📅 7D: ${data.change7.toFixed(2)}%`,
+            size: "md",
+            color: color7,
             margin: "sm"
           }
         ]
@@ -195,13 +227,13 @@ app.post("/webhook", async (req, res) => {
 
     const data = await getPrice(symbol)
 
-    const flex = buildFlex(symbol, data.price, data.change)
+    const flex = buildFlex(symbol, data)
 
     await replyLine(event.replyToken, flex)
 
   } catch (err) {
 
-    console.log("FINAL ERROR:", err.message)
+    console.log("FINAL V2 ERROR:", err.message)
 
     await replyLine(event.replyToken, {
       type: "text",
@@ -213,9 +245,9 @@ app.post("/webhook", async (req, res) => {
 })
 
 app.get("/", (req, res) => {
-  res.send("FINAL CLEAN VERSION ACTIVE 🚀")
+  res.send("FINAL V2 ACTIVE 🚀")
 })
 
 app.listen(PORT, () => {
-  console.log("🚀 FINAL CLEAN VERSION RUNNING")
+  console.log("🚀 FINAL V2 RUNNING")
 })
