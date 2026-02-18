@@ -6,16 +6,16 @@ app.use(express.json())
 
 const PORT = process.env.PORT || 10000
 
-// ==========================
-// ⚡ GLOBAL CACHE SYSTEM
-// ==========================
+// =========================
+// GLOBAL CACHE SYSTEM
+// =========================
 const cache = {}
 const pending = {}
 const CACHE_TTL = 20000
 
-// ==========================
-// 🔁 SAFE REQUEST
-// ==========================
+// =========================
+// SAFE REQUEST (Retry 429)
+// =========================
 async function safeRequest(url, retries = 2) {
   try {
     const res = await axios.get(url, { timeout: 5000 })
@@ -29,9 +29,33 @@ async function safeRequest(url, retries = 2) {
   }
 }
 
-// ==========================
-// 🧠 MULTI FALLBACK PRICE
-// ==========================
+// =========================
+// SYMBOL MAP
+// =========================
+function mapSymbol(text) {
+  const t = text.toLowerCase().trim()
+
+  if (t === "btc") return "BTCUSDT"
+  if (t === "eth") return "ETHUSDT"
+  if (t === "ทอง" || t === "gold") return "XAU"
+
+  return null
+}
+
+// =========================
+// SAVE CACHE
+// =========================
+function save(symbol, result) {
+  cache[symbol] = {
+    data: result,
+    time: Date.now()
+  }
+  return result
+}
+
+// =========================
+// PRICE FETCHER
+// =========================
 async function getPrice(symbol) {
 
   const now = Date.now()
@@ -46,15 +70,11 @@ async function getPrice(symbol) {
 
     try {
 
-      // ======================
-      // 🥇 GOLD FIX (NO BINANCE)
-      // ======================
-      if (symbol === "XAUUSDT") {
-
-        const data = await safeRequest(
-          "https://api.metals.live/v1/spot"
-        )
-
+      // =====================
+      // GOLD (Separate API)
+      // =====================
+      if (symbol === "XAU") {
+        const data = await safeRequest("https://api.metals.live/v1/spot")
         const gold = data.find(x => x.gold)
 
         return save(symbol, {
@@ -63,9 +83,9 @@ async function getPrice(symbol) {
         })
       }
 
-      // ======================
-      // 🪙 CRYPTO (BINANCE)
-      // ======================
+      // =====================
+      // CRYPTO (Binance)
+      // =====================
       let data
 
       try {
@@ -98,15 +118,57 @@ async function getPrice(symbol) {
   return pending[symbol]
 }
 
+// =========================
+// FLEX MESSAGE BUILDER
+// =========================
+function buildFlex(symbol, price, change) {
 
-// ==========================
-// 🤖 REPLY TO LINE
-// ==========================
+  const name = symbol === "XAU" ? "GOLD" : symbol.replace("USDT", "")
+  const color = change >= 0 ? "#00C853" : "#D50000"
+  const arrow = change >= 0 ? "📈" : "📉"
+
+  return {
+    type: "flex",
+    altText: `${name} Price`,
+    contents: {
+      type: "bubble",
+      body: {
+        type: "box",
+        layout: "vertical",
+        contents: [
+          {
+            type: "text",
+            text: `💰 ${name}`,
+            weight: "bold",
+            size: "xl"
+          },
+          {
+            type: "text",
+            text: `$${price.toFixed(2)} USD`,
+            size: "lg",
+            margin: "md"
+          },
+          {
+            type: "text",
+            text: `${arrow} 24H: ${change.toFixed(2)}%`,
+            size: "md",
+            color: color,
+            margin: "sm"
+          }
+        ]
+      }
+    }
+  }
+}
+
+// =========================
+// REPLY LINE
+// =========================
 async function replyLine(replyToken, message) {
   await axios.post(
     "https://api.line.me/v2/bot/message/reply",
     {
-      replyToken: replyToken,
+      replyToken,
       messages: [message]
     },
     {
@@ -118,15 +180,15 @@ async function replyLine(replyToken, message) {
   )
 }
 
-// ==========================
-// 🚀 WEBHOOK
-// ==========================
+// =========================
+// WEBHOOK
+// =========================
 app.post("/webhook", async (req, res) => {
 
-  try {
+  const event = req.body.events?.[0]
+  if (!event?.message?.text) return res.sendStatus(200)
 
-    const event = req.body.events?.[0]
-    if (!event?.message?.text) return res.sendStatus(200)
+  try {
 
     const symbol = mapSymbol(event.message.text)
     if (!symbol) return res.sendStatus(200)
@@ -138,16 +200,22 @@ app.post("/webhook", async (req, res) => {
     await replyLine(event.replyToken, flex)
 
   } catch (err) {
-    console.log("GOD MODE ERROR:", err.message)
+
+    console.log("FINAL ERROR:", err.message)
+
+    await replyLine(event.replyToken, {
+      type: "text",
+      text: "⚠️ ระบบกำลังโหลดข้อมูล กรุณาลองใหม่อีกครั้ง"
+    })
   }
 
   res.sendStatus(200)
 })
 
 app.get("/", (req, res) => {
-  res.send("LINE GOD MODE ACTIVE 🔥")
+  res.send("FINAL CLEAN VERSION ACTIVE 🚀")
 })
 
 app.listen(PORT, () => {
-  console.log("🚀 LINE GOD MODE RUNNING")
+  console.log("🚀 FINAL CLEAN VERSION RUNNING")
 })
