@@ -6,23 +6,22 @@ app.use(express.json())
 
 const PORT = process.env.PORT || 10000
 
-// =============================
+// ==========================
 // ⚡ GLOBAL CACHE SYSTEM
-// =============================
+// ==========================
 const cache = {}
 const pending = {}
-const CACHE_TTL = 20000 // 20 sec
+const CACHE_TTL = 20000
 
-// =============================
-// 🔁 SAFE REQUEST WITH RETRY
-// =============================
+// ==========================
+// 🔁 SAFE REQUEST
+// ==========================
 async function safeRequest(url, retries = 2) {
   try {
     const res = await axios.get(url, { timeout: 5000 })
     return res.data
   } catch (err) {
     if (err.response?.status === 429 && retries > 0) {
-      console.log("⚠️ 429 detected, retrying...")
       await new Promise(r => setTimeout(r, 1200))
       return safeRequest(url, retries - 1)
     }
@@ -30,19 +29,17 @@ async function safeRequest(url, retries = 2) {
   }
 }
 
-// =============================
-// 🧠 PRICE FETCHER (MULTI FALLBACK)
-// =============================
+// ==========================
+// 🧠 MULTI FALLBACK PRICE
+// ==========================
 async function getPrice(symbol) {
 
   const now = Date.now()
 
-  // 1️⃣ CACHE HIT
   if (cache[symbol] && now - cache[symbol].time < CACHE_TTL) {
     return cache[symbol].data
   }
 
-  // 2️⃣ DEDUPLICATION
   if (pending[symbol]) return pending[symbol]
 
   pending[symbol] = (async () => {
@@ -51,50 +48,40 @@ async function getPrice(symbol) {
 
       let data
 
-      // =============================
-      // PRIMARY: BINANCE FUTURES
-      // =============================
+      // Futures
       try {
         data = await safeRequest(
           `https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=${symbol}`
         )
 
         return save(symbol, {
-          price: parseFloat(data.lastPrice).toFixed(2),
-          change: parseFloat(data.priceChangePercent).toFixed(2)
+          price: parseFloat(data.lastPrice),
+          change: parseFloat(data.priceChangePercent)
         })
 
-      } catch (e) {
-        console.log("⚠️ Futures failed → Trying Spot...")
-      }
+      } catch {}
 
-      // =============================
-      // SECONDARY: BINANCE SPOT
-      // =============================
+      // Spot
       try {
         data = await safeRequest(
           `https://api.binance.com/api/v3/ticker/24hr?symbol=${symbol}`
         )
 
         return save(symbol, {
-          price: parseFloat(data.lastPrice).toFixed(2),
-          change: parseFloat(data.priceChangePercent).toFixed(2)
+          price: parseFloat(data.lastPrice),
+          change: parseFloat(data.priceChangePercent)
         })
 
-      } catch (e) {
-        console.log("⚠️ Spot failed → Trying CoinGecko...")
-      }
+      } catch {}
 
-      // =============================
-      // THIRD: COINGECKO FALLBACK
-      // =============================
+      // CoinGecko
       const cgMap = {
         BTCUSDT: "bitcoin",
         ETHUSDT: "ethereum",
         XAUUSDT: "tether-gold"
       }
 
-      if (!cgMap[symbol]) throw new Error("No fallback available")
+      if (!cgMap[symbol]) throw new Error("No fallback")
 
       data = await safeRequest(
         `https://api.coingecko.com/api/v3/simple/price?ids=${cgMap[symbol]}&vs_currencies=usd&include_24hr_change=true`
@@ -103,8 +90,8 @@ async function getPrice(symbol) {
       const coin = data[cgMap[symbol]]
 
       return save(symbol, {
-        price: parseFloat(coin.usd).toFixed(2),
-        change: parseFloat(coin.usd_24h_change).toFixed(2)
+        price: coin.usd,
+        change: coin.usd_24h_change
       })
 
     } finally {
@@ -116,9 +103,6 @@ async function getPrice(symbol) {
   return pending[symbol]
 }
 
-// =============================
-// 💾 SAVE CACHE
-// =============================
 function save(symbol, result) {
   cache[symbol] = {
     data: result,
@@ -127,9 +111,9 @@ function save(symbol, result) {
   return result
 }
 
-// =============================
+// ==========================
 // 🔎 SYMBOL MAP
-// =============================
+// ==========================
 function mapSymbol(text) {
   const t = text.toLowerCase()
 
@@ -140,12 +124,75 @@ function mapSymbol(text) {
   return null
 }
 
-// =============================
-// 🤖 LINE WEBHOOK
-// =============================
+// ==========================
+// 🎨 FLEX MESSAGE BUILDER
+// ==========================
+function buildFlex(symbol, price, change) {
+
+  const coin = symbol.replace("USDT", "")
+  const color = change >= 0 ? "#00C853" : "#D50000"
+  const arrow = change >= 0 ? "📈" : "📉"
+
+  return {
+    type: "flex",
+    altText: `${coin} Price`,
+    contents: {
+      type: "bubble",
+      body: {
+        type: "box",
+        layout: "vertical",
+        contents: [
+          {
+            type: "text",
+            text: `💰 ${coin}`,
+            weight: "bold",
+            size: "xl"
+          },
+          {
+            type: "text",
+            text: `$${price.toFixed(2)} USD`,
+            size: "lg",
+            margin: "md"
+          },
+          {
+            type: "text",
+            text: `${arrow} 24H: ${change.toFixed(2)}%`,
+            size: "md",
+            color: color,
+            margin: "sm"
+          }
+        ]
+      }
+    }
+  }
+}
+
+// ==========================
+// 🤖 REPLY TO LINE
+// ==========================
+async function replyLine(replyToken, message) {
+  await axios.post(
+    "https://api.line.me/v2/bot/message/reply",
+    {
+      replyToken: replyToken,
+      messages: [message]
+    },
+    {
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`
+      }
+    }
+  )
+}
+
+// ==========================
+// 🚀 WEBHOOK
+// ==========================
 app.post("/webhook", async (req, res) => {
 
   try {
+
     const event = req.body.events?.[0]
     if (!event?.message?.text) return res.sendStatus(200)
 
@@ -154,20 +201,21 @@ app.post("/webhook", async (req, res) => {
 
     const data = await getPrice(symbol)
 
-    console.log(`🔥 ${symbol} => ${data.price} (${data.change}%)`)
+    const flex = buildFlex(symbol, data.price, data.change)
+
+    await replyLine(event.replyToken, flex)
 
   } catch (err) {
-    console.log("❌ GOD MODE ERROR:", err.message)
+    console.log("GOD MODE ERROR:", err.message)
   }
 
   res.sendStatus(200)
 })
 
-// =============================
 app.get("/", (req, res) => {
-  res.send("GOD MODE ACTIVE 🔥")
+  res.send("LINE GOD MODE ACTIVE 🔥")
 })
 
 app.listen(PORT, () => {
-  console.log("🚀 Server running (GOD MODE)")
+  console.log("🚀 LINE GOD MODE RUNNING")
 })
