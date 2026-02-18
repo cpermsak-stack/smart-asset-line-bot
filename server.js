@@ -49,13 +49,11 @@ async function getPrices(symbols) {
     const symbol = normalize(sym);
 
     try {
-      // ===== CRYPTO (Binance) =====
+      // ===== CRYPTO (Spot) =====
       if (cryptoMap[symbol]) {
         const response = await axios.get(
-          `https://api.binance.com/api/v3/ticker/24hr`,
-          {
-            params: { symbol: cryptoMap[symbol] }
-          }
+          "https://api.binance.com/api/v3/ticker/24hr",
+          { params: { symbol: cryptoMap[symbol] } }
         );
 
         result[symbol] = {
@@ -64,17 +62,16 @@ async function getPrices(symbols) {
         };
       }
 
-      // ===== GOLD (Gold API Free) =====
+      // ===== GOLD (Binance Futures) =====
       else if (symbol === "ทอง" || symbol === "GOLD") {
         const response = await axios.get(
-          "https://api.metals.live/v1/spot/gold"
+          "https://fapi.binance.com/fapi/v1/ticker/24hr",
+          { params: { symbol: "XAUUSDT" } }
         );
 
-        const goldPrice = response.data[0].price;
-
         result[symbol] = {
-          price: goldPrice,
-          change: 0
+          price: parseFloat(response.data.lastPrice),
+          change: parseFloat(response.data.priceChangePercent)
         };
       }
 
@@ -186,5 +183,5 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 });
 
 app.listen(process.env.PORT || 3000, () => {
-  console.log("Server running (Binance + Gold FIX) 🚀");
+  console.log("Server running (Binance Futures Gold FIX) 🚀");
 });
