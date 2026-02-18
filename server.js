@@ -147,7 +147,7 @@ async function checkAlerts() {
   }
 }
 
-setInterval(checkAlerts, 60000);
+setInterval(checkAlerts, 120000);
 
 // ================= WEBHOOK =================
 app.post("/webhook", line.middleware(config), async (req, res) => {
