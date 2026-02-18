@@ -1,216 +1,113 @@
-const express = require("express");
-const axios = require("axios");
-const line = require("@line/bot-sdk");
-const { Pool } = require("pg");
+const express = require("express")
+const axios = require("axios")
+require("dotenv").config()
 
-const config = {
-  channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
-  channelSecret: process.env.LINE_CHANNEL_SECRET
-};
+const app = express()
+app.use(express.json())
 
-const client = new line.Client(config);
-const app = express();
+const PORT = process.env.PORT || 10000
 
-// ================= DATABASE =================
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-});
+// ===== GLOBAL CACHE =====
+const priceCache = {}
+const pendingRequests = {}
+const CACHE_TTL = 15000 // 15 sec
 
-async function initDB() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS alerts (
-      id SERIAL PRIMARY KEY,
-      user_id TEXT,
-      symbol TEXT,
-      target NUMERIC,
-      condition TEXT DEFAULT 'above'
-    );
-  `);
-}
-initDB();
-
-// ================= SYMBOL MAP =================
-const cryptoMap = {
-  BTC: "BTCUSDT",
-  ETH: "ETHUSDT",
-  BNB: "BNBUSDT"
-};
-
-function normalize(text) {
-  return text.trim().toUpperCase();
-}
-
-// ================= CACHE =================
-const priceCache = {
-  data: {},
-  timestamp: 0
-};
-
-const CACHE_TTL = 60000; // 60 วินาที
-
-// ================= GET PRICE =================
-async function getPrices(symbols) {
-  const now = Date.now();
-
-  // ===== ใช้ cache ถ้ายังไม่หมดอายุ =====
-  if (now - priceCache.timestamp < CACHE_TTL) {
-    return priceCache.data;
-  }
-
-  const result = {};
-  const normalized = symbols.map(s => normalize(s));
-
+// ===== SAFE FETCH FUNCTION =====
+async function fetchWithRetry(url, retries = 2) {
   try {
-    // ===== 1. CRYPTO (Batch Request Binance) =====
-    const cryptoSymbols = normalized.filter(s => cryptoMap[s]);
-
-    if (cryptoSymbols.length > 0) {
-      const response = await axios.get(
-        "https://api.binance.com/api/v3/ticker/24hr"
-      );
-
-      cryptoSymbols.forEach(sym => {
-        const pair = cryptoMap[sym];
-        const found = response.data.find(t => t.symbol === pair);
-
-        if (found) {
-          result[sym] = {
-            price: parseFloat(found.lastPrice),
-            change: parseFloat(found.priceChangePercent)
-          };
-        }
-      });
-    }
-
-    // ===== 2. GOLD (Yahoo Finance - XAUUSD) =====
-    if (normalized.includes("ทอง") || normalized.includes("GOLD")) {
-      const goldRes = await axios.get(
-        "https://query1.finance.yahoo.com/v7/finance/quote",
-        { params: { symbols: "GC=F" } }
-      );
-
-      const goldData = goldRes.data.quoteResponse.result[0];
-
-      result["ทอง"] = {
-        price: goldData.regularMarketPrice,
-        change: goldData.regularMarketChangePercent
-      };
-
-      result["GOLD"] = result["ทอง"];
-    }
-
-    // บันทึก cache
-    priceCache.data = result;
-    priceCache.timestamp = now;
-
-    return result;
-
+    const res = await axios.get(url, { timeout: 5000 })
+    return res.data
   } catch (err) {
-    console.log("ULTRA PRICE ERROR:", err.response?.status || err.message);
-    return {};
-  }
-}
-
-// ================= CHECK ALERTS =================
-async function checkAlerts() {
-  try {
-    const result = await pool.query("SELECT * FROM alerts");
-    if (result.rows.length === 0) return;
-
-    const symbols = [
-      ...new Set(result.rows.map(a => normalize(a.symbol)))
-    ];
-
-    const prices = await getPrices(symbols);
-    if (!prices || Object.keys(prices).length === 0) return;
-
-    for (const alert of result.rows) {
-      const current = prices[normalize(alert.symbol)];
-      if (!current) continue;
-
-      const hit =
-        (alert.condition === "above" && current.price >= alert.target) ||
-        (alert.condition === "below" && current.price <= alert.target);
-
-      if (hit) {
-        await client.pushMessage(alert.user_id, {
-          type: "text",
-          text:
-            `🚨 แจ้งเตือน!\n` +
-            `${alert.symbol}\n` +
-            `ราคา: ${current.price} USD`
-        });
-
-        await pool.query("DELETE FROM alerts WHERE id = $1", [alert.id]);
-      }
+    if (err.response && err.response.status === 429 && retries > 0) {
+      console.log("⚠️ Hit 429, retrying...")
+      await new Promise(r => setTimeout(r, 1000))
+      return fetchWithRetry(url, retries - 1)
     }
-
-  } catch (err) {
-    console.log("CHECK ALERT ERROR:", err.message);
+    throw err
   }
 }
 
-setInterval(checkAlerts, 60000);
+// ===== BINANCE PRICE FETCHER =====
+async function getBinancePrice(symbol) {
 
-// ================= WEBHOOK =================
-app.post("/webhook", line.middleware(config), async (req, res) => {
-  try {
-    const event = req.body.events[0];
-    if (!event || event.type !== "message") return res.sendStatus(200);
+  const now = Date.now()
 
-    const text = event.message.text.trim();
-    const userId = event.source.userId;
+  // 1️⃣ Use cache if fresh
+  if (priceCache[symbol] && now - priceCache[symbol].time < CACHE_TTL) {
+    return priceCache[symbol].data
+  }
 
-    // ===== ALERT =====
-    if (text.toUpperCase().startsWith("ALERT ")) {
-      const parts = text.split(" ");
-      const symbol = parts[1];
-      const target = parseFloat(parts[2]);
+  // 2️⃣ If already fetching → return same promise
+  if (pendingRequests[symbol]) {
+    return pendingRequests[symbol]
+  }
 
-      if (!symbol || isNaN(target)) {
-        return client.replyMessage(event.replyToken, {
-          type: "text",
-          text: "ตัวอย่าง: ALERT BTC 70000"
-        });
+  // 3️⃣ Create new fetch promise
+  pendingRequests[symbol] = (async () => {
+    try {
+      const data = await fetchWithRetry(
+        `https://api.binance.com/api/v3/ticker/24hr?symbol=${symbol}`
+      )
+
+      const result = {
+        price: parseFloat(data.lastPrice).toFixed(2),
+        change: parseFloat(data.priceChangePercent).toFixed(2)
       }
 
-      await pool.query(
-        "INSERT INTO alerts (user_id, symbol, target) VALUES ($1,$2,$3)",
-        [userId, normalize(symbol), target]
-      );
+      priceCache[symbol] = {
+        data: result,
+        time: Date.now()
+      }
 
-      return client.replyMessage(event.replyToken, {
-        type: "text",
-        text: "เพิ่มแจ้งเตือนเรียบร้อยแล้ว"
-      });
+      return result
+
+    } finally {
+      delete pendingRequests[symbol]
     }
+  })()
 
-    // ===== PRICE =====
-    const prices = await getPrices([text]);
-    const data = prices[normalize(text)];
+  return pendingRequests[symbol]
+}
 
-    if (!data) {
-      return client.replyMessage(event.replyToken, {
-        type: "text",
-        text: "ไม่พบข้อมูล"
-      });
-    }
+// ===== SYMBOL MAPPER =====
+function mapSymbol(text) {
+  const t = text.toLowerCase()
 
-    return client.replyMessage(event.replyToken, {
-      type: "text",
-      text:
-        `💰 ${normalize(text)}\n` +
-        `ราคา: ${data.price} USD\n` +
-        `24h: ${data.change.toFixed(2)}%`
-    });
+  if (t === "btc") return "BTCUSDT"
+  if (t === "eth") return "ETHUSDT"
+  if (t === "ทอง" || t === "gold") return "XAUUSDT"
+
+  return null
+}
+
+// ===== LINE WEBHOOK =====
+app.post("/webhook", async (req, res) => {
+  try {
+    const event = req.body.events?.[0]
+    if (!event) return res.sendStatus(200)
+
+    const text = event.message?.text
+    if (!text) return res.sendStatus(200)
+
+    const symbol = mapSymbol(text)
+    if (!symbol) return res.sendStatus(200)
+
+    const data = await getBinancePrice(symbol)
+
+    console.log(`✅ ${symbol} => ${data.price}`)
 
   } catch (err) {
-    console.log("WEBHOOK ERROR:", err);
-    res.sendStatus(500);
+    console.log("❌ ULTRA ERROR:", err.message)
   }
-});
 
-app.listen(process.env.PORT || 3000, () => {
-  console.log("Server running (ULTRA STABLE) 🚀");
-});
+  res.sendStatus(200)
+})
+
+// ===== HEALTH CHECK =====
+app.get("/", (req, res) => {
+  res.send("ULTRA STABLE V2 🚀")
+})
+
+app.listen(PORT, () => {
+  console.log("🚀 Server running (ULTRA STABLE V2)")
+})
