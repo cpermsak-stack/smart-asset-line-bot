@@ -34,40 +34,56 @@ initDB();
 const cryptoMap = {
   BTC: "BTCUSDT",
   ETH: "ETHUSDT",
-  BNB: "BNBUSDT",
-  ทอง: "XAUUSDT",
-  GOLD: "XAUUSDT"
+  BNB: "BNBUSDT"
 };
 
 function normalize(text) {
   return text.trim().toUpperCase();
 }
 
-// ================= GET PRICE FROM BINANCE =================
+// ================= GET PRICE =================
 async function getPrices(symbols) {
-  try {
-    const result = {};
+  const result = {};
 
-    for (const sym of symbols) {
-      const mapped = cryptoMap[normalize(sym)];
-      if (!mapped) continue;
+  for (const sym of symbols) {
+    const symbol = normalize(sym);
 
-      const response = await axios.get(
-        `https://api.binance.com/api/v3/ticker/24hr?symbol=${mapped}`
-      );
+    try {
+      // ===== CRYPTO (Binance) =====
+      if (cryptoMap[symbol]) {
+        const response = await axios.get(
+          `https://api.binance.com/api/v3/ticker/24hr`,
+          {
+            params: { symbol: cryptoMap[symbol] }
+          }
+        );
 
-      result[normalize(sym)] = {
-        price: parseFloat(response.data.lastPrice),
-        change: parseFloat(response.data.priceChangePercent)
-      };
+        result[symbol] = {
+          price: parseFloat(response.data.lastPrice),
+          change: parseFloat(response.data.priceChangePercent)
+        };
+      }
+
+      // ===== GOLD (Gold API Free) =====
+      else if (symbol === "ทอง" || symbol === "GOLD") {
+        const response = await axios.get(
+          "https://api.metals.live/v1/spot/gold"
+        );
+
+        const goldPrice = response.data[0].price;
+
+        result[symbol] = {
+          price: goldPrice,
+          change: 0
+        };
+      }
+
+    } catch (err) {
+      console.log("PRICE ERROR for", symbol, err.response?.status);
     }
-
-    return result;
-
-  } catch (err) {
-    console.log("BINANCE ERROR:", err.message);
-    return {};
   }
+
+  return result;
 }
 
 // ================= CHECK ALERTS =================
@@ -118,33 +134,24 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
     if (!event || event.type !== "message") return res.sendStatus(200);
 
     const text = event.message.text.trim();
-    const textUpper = text.toUpperCase();
     const userId = event.source.userId;
 
     // ===== ALERT =====
-    if (textUpper.startsWith("ALERT ") || text.startsWith("แจ้งเตือน ")) {
+    if (text.toUpperCase().startsWith("ALERT ")) {
       const parts = text.split(" ");
       const symbol = parts[1];
-      let condition = "above";
-      let target;
-
-      if (parts.includes("BELOW") || parts.includes("ต่ำกว่า")) {
-        condition = "below";
-        target = parseFloat(parts[parts.length - 1]);
-      } else {
-        target = parseFloat(parts[2]);
-      }
+      const target = parseFloat(parts[2]);
 
       if (!symbol || isNaN(target)) {
         return client.replyMessage(event.replyToken, {
           type: "text",
-          text: "ตัวอย่าง: ALERT BTC 70000 หรือ ALERT BTC BELOW 65000"
+          text: "ตัวอย่าง: ALERT BTC 70000"
         });
       }
 
       await pool.query(
-        "INSERT INTO alerts (user_id, symbol, target, condition) VALUES ($1,$2,$3,$4)",
-        [userId, normalize(symbol), target, condition]
+        "INSERT INTO alerts (user_id, symbol, target) VALUES ($1,$2,$3)",
+        [userId, normalize(symbol), target]
       );
 
       return client.replyMessage(event.replyToken, {
@@ -169,7 +176,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
       text:
         `💰 ${normalize(text)}\n` +
         `ราคา: ${data.price} USD\n` +
-        `24h: ${data.change.toFixed(2)}%`
+        `24h: ${data.change}%`
     });
 
   } catch (err) {
@@ -179,5 +186,5 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 });
 
 app.listen(process.env.PORT || 3000, () => {
-  console.log("Server running (Binance Version) 🚀");
+  console.log("Server running (Binance + Gold FIX) 🚀");
 });
