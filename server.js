@@ -7,69 +7,130 @@ app.use(express.json())
 
 const PORT = process.env.PORT || 10000
 
-// ===== GLOBAL CACHE =====
-const priceCache = {}
-const pendingRequests = {}
-const CACHE_TTL = 15000 // 15 sec
+// =============================
+// ⚡ GLOBAL CACHE SYSTEM
+// =============================
+const cache = {}
+const pending = {}
+const CACHE_TTL = 20000 // 20 sec
 
-// ===== SAFE FETCH FUNCTION =====
-async function fetchWithRetry(url, retries = 2) {
+// =============================
+// 🔁 SAFE REQUEST WITH RETRY
+// =============================
+async function safeRequest(url, retries = 2) {
   try {
     const res = await axios.get(url, { timeout: 5000 })
     return res.data
   } catch (err) {
-    if (err.response && err.response.status === 429 && retries > 0) {
-      console.log("⚠️ Hit 429, retrying...")
-      await new Promise(r => setTimeout(r, 1000))
-      return fetchWithRetry(url, retries - 1)
+    if (err.response?.status === 429 && retries > 0) {
+      console.log("⚠️ 429 detected, retrying...")
+      await new Promise(r => setTimeout(r, 1200))
+      return safeRequest(url, retries - 1)
     }
     throw err
   }
 }
 
-// ===== BINANCE PRICE FETCHER =====
-async function getBinancePrice(symbol) {
+// =============================
+// 🧠 PRICE FETCHER (MULTI FALLBACK)
+// =============================
+async function getPrice(symbol) {
 
   const now = Date.now()
 
-  // 1️⃣ Use cache if fresh
-  if (priceCache[symbol] && now - priceCache[symbol].time < CACHE_TTL) {
-    return priceCache[symbol].data
+  // 1️⃣ CACHE HIT
+  if (cache[symbol] && now - cache[symbol].time < CACHE_TTL) {
+    return cache[symbol].data
   }
 
-  // 2️⃣ If already fetching → return same promise
-  if (pendingRequests[symbol]) {
-    return pendingRequests[symbol]
-  }
+  // 2️⃣ DEDUPLICATION
+  if (pending[symbol]) return pending[symbol]
 
-  // 3️⃣ Create new fetch promise
-  pendingRequests[symbol] = (async () => {
+  pending[symbol] = (async () => {
+
     try {
-      const data = await fetchWithRetry(
-        `https://api.binance.com/api/v3/ticker/24hr?symbol=${symbol}`
+
+      let data
+
+      // =============================
+      // PRIMARY: BINANCE FUTURES
+      // =============================
+      try {
+        data = await safeRequest(
+          `https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=${symbol}`
+        )
+
+        return save(symbol, {
+          price: parseFloat(data.lastPrice).toFixed(2),
+          change: parseFloat(data.priceChangePercent).toFixed(2)
+        })
+
+      } catch (e) {
+        console.log("⚠️ Futures failed → Trying Spot...")
+      }
+
+      // =============================
+      // SECONDARY: BINANCE SPOT
+      // =============================
+      try {
+        data = await safeRequest(
+          `https://api.binance.com/api/v3/ticker/24hr?symbol=${symbol}`
+        )
+
+        return save(symbol, {
+          price: parseFloat(data.lastPrice).toFixed(2),
+          change: parseFloat(data.priceChangePercent).toFixed(2)
+        })
+
+      } catch (e) {
+        console.log("⚠️ Spot failed → Trying CoinGecko...")
+      }
+
+      // =============================
+      // THIRD: COINGECKO FALLBACK
+      // =============================
+      const cgMap = {
+        BTCUSDT: "bitcoin",
+        ETHUSDT: "ethereum",
+        XAUUSDT: "tether-gold"
+      }
+
+      if (!cgMap[symbol]) throw new Error("No fallback available")
+
+      data = await safeRequest(
+        `https://api.coingecko.com/api/v3/simple/price?ids=${cgMap[symbol]}&vs_currencies=usd&include_24hr_change=true`
       )
 
-      const result = {
-        price: parseFloat(data.lastPrice).toFixed(2),
-        change: parseFloat(data.priceChangePercent).toFixed(2)
-      }
+      const coin = data[cgMap[symbol]]
 
-      priceCache[symbol] = {
-        data: result,
-        time: Date.now()
-      }
-
-      return result
+      return save(symbol, {
+        price: parseFloat(coin.usd).toFixed(2),
+        change: parseFloat(coin.usd_24h_change).toFixed(2)
+      })
 
     } finally {
-      delete pendingRequests[symbol]
+      delete pending[symbol]
     }
+
   })()
 
-  return pendingRequests[symbol]
+  return pending[symbol]
 }
 
-// ===== SYMBOL MAPPER =====
+// =============================
+// 💾 SAVE CACHE
+// =============================
+function save(symbol, result) {
+  cache[symbol] = {
+    data: result,
+    time: Date.now()
+  }
+  return result
+}
+
+// =============================
+// 🔎 SYMBOL MAP
+// =============================
 function mapSymbol(text) {
   const t = text.toLowerCase()
 
@@ -80,34 +141,34 @@ function mapSymbol(text) {
   return null
 }
 
-// ===== LINE WEBHOOK =====
+// =============================
+// 🤖 LINE WEBHOOK
+// =============================
 app.post("/webhook", async (req, res) => {
+
   try {
     const event = req.body.events?.[0]
-    if (!event) return res.sendStatus(200)
+    if (!event?.message?.text) return res.sendStatus(200)
 
-    const text = event.message?.text
-    if (!text) return res.sendStatus(200)
-
-    const symbol = mapSymbol(text)
+    const symbol = mapSymbol(event.message.text)
     if (!symbol) return res.sendStatus(200)
 
-    const data = await getBinancePrice(symbol)
+    const data = await getPrice(symbol)
 
-    console.log(`✅ ${symbol} => ${data.price}`)
+    console.log(`🔥 ${symbol} => ${data.price} (${data.change}%)`)
 
   } catch (err) {
-    console.log("❌ ULTRA ERROR:", err.message)
+    console.log("❌ GOD MODE ERROR:", err.message)
   }
 
   res.sendStatus(200)
 })
 
-// ===== HEALTH CHECK =====
+// =============================
 app.get("/", (req, res) => {
-  res.send("ULTRA STABLE V2 🚀")
+  res.send("GOD MODE ACTIVE 🔥")
 })
 
 app.listen(PORT, () => {
-  console.log("🚀 Server running (ULTRA STABLE V2)")
+  console.log("🚀 Server running (GOD MODE)")
 })
