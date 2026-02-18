@@ -241,7 +241,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 
       await pool.query(
         "INSERT INTO alerts (user_id, symbol, target, condition) VALUES ($1,$2,$3,$4)",
-        [userId, symbol.toUpperCase(), target, condition]
+        [userId, normalize(symbol), target, condition]
       );
 
       return client.replyMessage(event.replyToken, {
