@@ -17,14 +17,14 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-// สร้าง table ถ้ายังไม่มี
 async function initDB() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS alerts (
       id SERIAL PRIMARY KEY,
       user_id TEXT,
       symbol TEXT,
-      target NUMERIC
+      target NUMERIC,
+      condition TEXT DEFAULT 'above'
     );
   `);
 }
@@ -43,55 +43,91 @@ function normalize(text) {
   return text.trim().toUpperCase();
 }
 
-// ================= GET PRICE =================
-async function getPrice(symbolInput) {
+// ================= CACHE =================
+const priceCache = {};
+const CACHE_TTL = 30000;
+
+// ================= GET MULTI PRICE =================
+async function getPrices(symbols) {
   try {
-    const key = normalize(symbolInput);
-    const id = cryptoMap[key];
-    if (!id) return null;
+    const ids = symbols
+      .map(sym => cryptoMap[normalize(sym)])
+      .filter(Boolean);
+
+    if (ids.length === 0) return {};
+
+    const uniqueIds = [...new Set(ids)].join(",");
 
     const response = await axios.get(
       "https://api.coingecko.com/api/v3/simple/price",
       {
         params: {
-          ids: id,
+          ids: uniqueIds,
           vs_currencies: "usd",
           include_24hr_change: true
         }
       }
     );
 
-    const data = response.data[id];
-    if (!data) return null;
+    const result = {};
 
-    return {
-      symbol: key,
-      price: data.usd,
-      change: data.usd_24h_change
-    };
+    symbols.forEach(sym => {
+      const key = normalize(sym);
+      const id = cryptoMap[key];
+      if (response.data[id]) {
+        result[key] = {
+          price: response.data[id].usd,
+          change: response.data[id].usd_24h_change
+        };
+      }
+    });
+
+    return result;
 
   } catch (err) {
-    console.log("PRICE ERROR:", err.message);
-    return null;
+    if (err.response?.status === 429) {
+      console.log("RATE LIMIT HIT (429)");
+    } else {
+      console.log("PRICE ERROR:", err.message);
+    }
+    return {};
   }
 }
 
 // ================= CHECK ALERTS =================
 async function checkAlerts() {
-  const result = await pool.query("SELECT * FROM alerts");
+  try {
+    const result = await pool.query("SELECT * FROM alerts");
+    if (result.rows.length === 0) return;
 
-  for (const alert of result.rows) {
-    const priceData = await getPrice(alert.symbol);
-    if (!priceData) continue;
+    const symbols = [
+      ...new Set(result.rows.map(a => normalize(a.symbol)))
+    ];
 
-    if (priceData.price >= alert.target) {
-      await client.pushMessage(alert.user_id, {
-        type: "text",
-        text: `🚨 แจ้งเตือน!\n${alert.symbol} ถึง ${priceData.price} USD แล้ว`
-      });
+    const prices = await getPrices(symbols);
 
-      await pool.query("DELETE FROM alerts WHERE id = $1", [alert.id]);
+    for (const alert of result.rows) {
+      const current = prices[normalize(alert.symbol)];
+      if (!current) continue;
+
+      const hit =
+        (alert.condition === "above" && current.price >= alert.target) ||
+        (alert.condition === "below" && current.price <= alert.target);
+
+      if (hit) {
+        await client.pushMessage(alert.user_id, {
+          type: "text",
+          text:
+            `🚨 แจ้งเตือน!\n` +
+            `${alert.symbol.toUpperCase()} ราคา ${current.price} USD`
+        });
+
+        await pool.query("DELETE FROM alerts WHERE id = $1", [alert.id]);
+      }
     }
+
+  } catch (err) {
+    console.log("CHECK ALERT ERROR:", err.message);
   }
 }
 
@@ -104,13 +140,13 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
     if (!event || event.type !== "message") return res.sendStatus(200);
 
     const text = event.message.text.trim();
-    const userId = event.source.userId;
     const textUpper = text.toUpperCase();
+    const userId = event.source.userId;
 
     // ===== LIST =====
     if (textUpper === "LIST" || text === "รายการแจ้งเตือน") {
       const result = await pool.query(
-        "SELECT * FROM alerts WHERE user_id = $1",
+        "SELECT * FROM alerts WHERE user_id = $1 ORDER BY id",
         [userId]
       );
 
@@ -123,7 +159,8 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 
       let message = "📌 แจ้งเตือนของคุณ\n";
       result.rows.forEach((a, i) => {
-        message += `${i + 1}. ${a.symbol} ที่ ${a.target} USD\n`;
+        const sign = a.condition === "above" ? "≥" : "≤";
+        message += `${i + 1}. ${a.symbol} ${sign} ${a.target}\n`;
       });
 
       return client.replyMessage(event.replyToken, {
@@ -132,34 +169,79 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
       });
     }
 
+    // ===== DELETE ALL =====
+    if (textUpper === "DELETE ALL" || text === "ลบทั้งหมด") {
+      await pool.query("DELETE FROM alerts WHERE user_id = $1", [userId]);
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text: "ลบแจ้งเตือนทั้งหมดแล้ว"
+      });
+    }
+
+    // ===== DELETE INDEX =====
+    if (textUpper.startsWith("DELETE ") || text.startsWith("ลบ ")) {
+      const index = parseInt(text.split(" ")[1]);
+      if (isNaN(index)) return res.sendStatus(200);
+
+      const result = await pool.query(
+        "SELECT * FROM alerts WHERE user_id = $1 ORDER BY id",
+        [userId]
+      );
+
+      if (!result.rows[index - 1]) {
+        return client.replyMessage(event.replyToken, {
+          type: "text",
+          text: "ไม่พบรายการ"
+        });
+      }
+
+      await pool.query("DELETE FROM alerts WHERE id = $1", [
+        result.rows[index - 1].id
+      ]);
+
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text: "ลบแจ้งเตือนแล้ว"
+      });
+    }
+
     // ===== ALERT =====
     if (textUpper.startsWith("ALERT ") || text.startsWith("แจ้งเตือน ")) {
       const parts = text.split(" ");
       const symbol = parts[1];
-      const target = parseFloat(parts[2]);
+      let condition = "above";
+      let target;
+
+      if (parts.includes("below") || parts.includes("ต่ำกว่า")) {
+        condition = "below";
+        target = parseFloat(parts[parts.length - 1]);
+      } else {
+        target = parseFloat(parts[2]);
+      }
 
       if (!symbol || isNaN(target)) {
         return client.replyMessage(event.replyToken, {
           type: "text",
-          text: "รูปแบบ: ALERT BTC 70000"
+          text: "ตัวอย่าง: ALERT BTC 70000 หรือ ALERT BTC BELOW 65000"
         });
       }
 
       await pool.query(
-        "INSERT INTO alerts (user_id, symbol, target) VALUES ($1, $2, $3)",
-        [userId, symbol.toUpperCase(), target]
+        "INSERT INTO alerts (user_id, symbol, target, condition) VALUES ($1,$2,$3,$4)",
+        [userId, symbol.toUpperCase(), target, condition]
       );
 
       return client.replyMessage(event.replyToken, {
         type: "text",
-        text: `เพิ่มแจ้งเตือน ${symbol} ที่ ${target} USD แล้ว`
+        text: "เพิ่มแจ้งเตือนเรียบร้อยแล้ว"
       });
     }
 
     // ===== PRICE =====
-    const priceData = await getPrice(text);
+    const prices = await getPrices([text]);
+    const data = prices[normalize(text)];
 
-    if (!priceData) {
+    if (!data) {
       return client.replyMessage(event.replyToken, {
         type: "text",
         text: "ไม่พบข้อมูล"
@@ -169,9 +251,9 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
     return client.replyMessage(event.replyToken, {
       type: "text",
       text:
-        `💰 ${priceData.symbol}\n` +
-        `ราคา: ${priceData.price} USD\n` +
-        `24h: ${priceData.change.toFixed(2)}%`
+        `💰 ${normalize(text)}\n` +
+        `ราคา: ${data.price} USD\n` +
+        `24h: ${data.change.toFixed(2)}%`
     });
 
   } catch (err) {
@@ -181,5 +263,5 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 });
 
 app.listen(process.env.PORT || 3000, () => {
-  console.log("Server running with DB...");
+  console.log("Server running (Version 3) 🚀");
 });
